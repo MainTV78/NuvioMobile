@@ -246,7 +246,7 @@ jobs:
           || gh release upload "mpvkit-$sha" mpvkit-xcframeworks-ios.tar.gz \
             --repo "$GITHUB_REPOSITORY" --clobber
 
-      - name: Archive app (unsigned)
+      - name: Prepare Gradle config for CI
         run: |
           set -euo pipefail
 
@@ -257,19 +257,29 @@ jobs:
           # is located via ANDROID_HOME.
           touch source/local.properties
 
-          # gradle.properties is tuned for developer machines
-          # (kotlin.native.jvmArgs=-Xmx12288M, org.gradle.jvmargs=-Xmx8192M);
-          # together those exceed even this 14 GB runner once the OS, Xcode,
-          # and clang take their share. Keep a large heap for the
-          # Kotlin/Native linker (its LTO/devirtualization pass is the peak
-          # consumer and needs ~8+ GB) and shrink the Gradle/Kotlin daemons,
-          # which need nowhere near their developer-machine settings. This
-          # only touches the ephemeral checkout, not the upstream source.
+          # gradle.properties is tuned for developer machines. Keep upstream's
+          # 12 GB heap for the Kotlin/Native linker — its release-mode
+          # devirtualization/LTO passes genuinely need it for a codebase this
+          # size (see KT-78518 / KT-80367) — but shrink the Gradle and Kotlin
+          # daemons, which don't need their developer-machine sizes here.
+          # This only touches the ephemeral checkout, not upstream source.
           sed -i '' \
             -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx10240M/' \
-            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx1536M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
+            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx2048M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
             source/gradle.properties
+
+      - name: Pre-link Kotlin framework
+        # Run the memory-hungry Kotlin/Native release link as its own step,
+        # before xcodebuild, so its ~12 GB heap peak doesn't compete with
+        # Xcode and clang for the runner's 14 GB. The Xcode "Compile Kotlin
+        # Framework" script phase re-runs Gradle afterwards and finds the
+        # link task up-to-date.
+        working-directory: source
+        run: ./gradlew :composeApp:linkReleaseFrameworkIosArm64
+
+      - name: Archive app (unsigned)
+        run: |
+          set -euo pipefail
 
           # Fail fast with a clear message if any MPVKit binary is missing.
           for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' source/MPVKit/Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
