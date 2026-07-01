@@ -99,7 +99,14 @@ jobs:
     name: Build IPA ${{ needs.check.outputs.tag }}
     needs: check
     if: needs.check.outputs.should_build == 'true'
-    runs-on: macos-latest
+    # Intel standard runner (4 vCPU / 14 GB RAM), not macos-latest: the arm64
+    # standard runner has only 7 GB of RAM and the Kotlin/Native release link
+    # (LTO/devirtualization) needs ~8-12 GB of JVM heap for this codebase —
+    # upstream sizes kotlin.native.jvmArgs at 12 GB for developer machines.
+    # Intel standard runners are still free/unlimited on public repositories
+    # (only -large/-xlarge runners are paid), and Kotlin/Native cross-compiles
+    # the iOS arm64 framework from an x64 host.
+    runs-on: macos-15-intel
     # A cold MPVKit build takes ~10 minutes (most dependencies are downloaded
     # prebuilt; only FFmpeg and mpv compile from source). The bulk of the job
     # is the Kotlin/Native + Xcode build.
@@ -142,7 +149,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.konan
-          key: konan-${{ runner.os }}-${{ hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties') }}
+          key: konan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/gradle/libs.versions.toml', 'source/gradle/wrapper/gradle-wrapper.properties') }}
 
       - name: Restore prebuilt MPVKit xcframeworks
         id: mpvkit
@@ -251,14 +258,16 @@ jobs:
           touch source/local.properties
 
           # gradle.properties is tuned for developer machines
-          # (kotlin.native.jvmArgs=-Xmx12288M, org.gradle.jvmargs=-Xmx8192M),
-          # but standard macos-latest runners have only 7 GB of RAM total, so
-          # the Kotlin/Native linker OOMs during the release framework's
-          # LTO/devirtualization pass. Cap heap sizes to fit the runner; this
+          # (kotlin.native.jvmArgs=-Xmx12288M, org.gradle.jvmargs=-Xmx8192M);
+          # together those exceed even this 14 GB runner once the OS, Xcode,
+          # and clang take their share. Keep a large heap for the
+          # Kotlin/Native linker (its LTO/devirtualization pass is the peak
+          # consumer and needs ~8+ GB) and shrink the Gradle/Kotlin daemons,
+          # which need nowhere near their developer-machine settings. This
           # only touches the ephemeral checkout, not the upstream source.
           sed -i '' \
             -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx4096M/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx10240M/' \
             -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx1536M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
             source/gradle.properties
 
