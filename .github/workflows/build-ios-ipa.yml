@@ -257,19 +257,32 @@ jobs:
           # is located via ANDROID_HOME.
           touch source/local.properties
 
-          # gradle.properties is tuned for developer machines. The release
-          # link's whole-program LTO passes (DFG build + devirtualization,
-          # KT-78518 / KT-80367; fixed only in Kotlin 2.4) OOM'd even at
-          # upstream's 12 GB in an isolated process, so give the linker 16 GB
-          # and let macOS memory compression absorb the ~2 GB overage past
-          # the runner's 14 GB of physical RAM. Shrink the Gradle and Kotlin
-          # daemons, which don't need their developer-machine sizes here.
-          # This only touches the ephemeral checkout, not upstream source.
+          # gradle.properties is tuned for developer machines; size the JVMs
+          # for the runner's 14 GB instead. This only touches the ephemeral
+          # checkout, not upstream source.
           sed -i '' \
             -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx16384M -XX:+UseParallelGC/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx8192M/' \
             -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx2048M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
             source/gradle.properties
+
+          # Kotlin 2.3's release-mode whole-program LTO (DFG build +
+          # devirtualization, KT-78518/KT-80367) runs out of memory for this
+          # codebase even with a 16 GB heap — more than any free GitHub
+          # runner has. Kotlin 2.4 fixes the blow-up, but force-bumping
+          # upstream's toolchain from CI is riskier than skipping the
+          # optimization pass: optimized=false drops -opt from the framework
+          # link, which skips LTO and links comfortably in memory. Remove
+          # this once upstream is on Kotlin 2.4+.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("source/composeApp/build.gradle.kts")
+          text = path.read_text()
+          needle = 'baseName = "ComposeApp"'
+          assert needle in text, "iOS framework block changed upstream; revisit this patch"
+          path.write_text(text.replace(needle, needle + "\n            optimized = false", 1))
+          PY
 
       - name: Pre-link Kotlin framework
         # Run the memory-hungry Kotlin/Native release link as its own step,
