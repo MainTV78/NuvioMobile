@@ -243,6 +243,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          # The generateRuntimeConfigs Gradle task declares local.properties
+          # as a required input file (developers always have one locally).
+          # An empty file is valid: every runtime config value (Supabase URL
+          # and key, etc.) falls back to an empty string, and the Android SDK
+          # is located via ANDROID_HOME.
+          touch source/local.properties
+
           # Fail fast with a clear message if any MPVKit binary is missing.
           for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' source/MPVKit/Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
             test -d "source/MPVKit/dist/release/xcframework/$name.xcframework" || {
