@@ -257,23 +257,29 @@ jobs:
           # is located via ANDROID_HOME.
           touch source/local.properties
 
-          # gradle.properties is tuned for developer machines. Keep upstream's
-          # 12 GB heap for the Kotlin/Native linker — its release-mode
-          # devirtualization/LTO passes genuinely need it for a codebase this
-          # size (see KT-78518 / KT-80367) — but shrink the Gradle and Kotlin
+          # gradle.properties is tuned for developer machines. The release
+          # link's whole-program LTO passes (DFG build + devirtualization,
+          # KT-78518 / KT-80367; fixed only in Kotlin 2.4) OOM'd even at
+          # upstream's 12 GB in an isolated process, so give the linker 16 GB
+          # and let macOS memory compression absorb the ~2 GB overage past
+          # the runner's 14 GB of physical RAM. Shrink the Gradle and Kotlin
           # daemons, which don't need their developer-machine sizes here.
           # This only touches the ephemeral checkout, not upstream source.
           sed -i '' \
             -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx16384M -XX:+UseParallelGC/' \
             -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx2048M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
             source/gradle.properties
 
       - name: Pre-link Kotlin framework
         # Run the memory-hungry Kotlin/Native release link as its own step,
-        # before xcodebuild, so its ~12 GB heap peak doesn't compete with
-        # Xcode and clang for the runner's 14 GB. The Xcode "Compile Kotlin
-        # Framework" script phase re-runs Gradle afterwards and finds the
-        # link task up-to-date.
+        # before xcodebuild, so its heap peak doesn't compete with Xcode and
+        # clang for the runner's 14 GB. The Xcode "Compile Kotlin Framework"
+        # script phase re-runs Gradle afterwards and finds the link task
+        # up-to-date. The timeout is a fuse: if the over-provisioned heap
+        # degrades into swap-thrashing instead of finishing, fail fast
+        # rather than hanging for the job's full 3 hours.
+        timeout-minutes: 75
         working-directory: source
         run: ./gradlew :composeApp:linkReleaseFrameworkIosArm64
 
