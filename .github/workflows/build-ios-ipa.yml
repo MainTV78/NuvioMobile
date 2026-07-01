@@ -17,13 +17,16 @@
 #     `./gradlew :composeApp:embedAndSignAppleFrameworkForXcode` (JDK 17+).
 #   - The MPVKit git submodule is a local Swift package whose Libmpv/FFmpeg/
 #     Libplacebo binary targets point at dist/release/xcframework/, which is
-#     NOT committed — it must be built from source with `make build`
-#     (~1-2 h). Because that only changes when the submodule pointer moves,
-#     the resulting xcframeworks are stored as assets on an internal
-#     prerelease tagged mpvkit-<submodule sha> and reused until upstream bumps
-#     the submodule. (GitHub's actions/cache is evicted after 7 idle days,
-#     which a weekly schedule would race against, so release assets are used
-#     instead.)
+#     NOT committed — it must be produced with `make build` (~10 min: most
+#     dependencies download prebuilt, only FFmpeg and mpv compile). Quirk:
+#     the build scripts wipe that directory per library, so it has to be
+#     reassembled afterwards from the per-library zips (plus the prebuilt
+#     Libplacebo download). Because all of this only changes when the
+#     submodule pointer moves, the assembled xcframeworks are stored as
+#     assets on an internal prerelease tagged mpvkit-<submodule sha> and
+#     reused until upstream bumps the submodule. (GitHub's actions/cache is
+#     evicted after 7 idle days, which would race the schedule, so release
+#     assets are used instead.)
 #   - The Android SDK is required even for the iOS build: the Kotlin
 #     Multiplatform Gradle configuration also configures the Android targets.
 #   - NUVIO_IOS_DISTRIBUTION selects the app flavor; "full" is the sideload
@@ -97,9 +100,10 @@ jobs:
     needs: check
     if: needs.check.outputs.should_build == 'true'
     runs-on: macos-latest
-    # Generous limit: a cold MPVKit source build (mpv/ffmpeg/libplacebo) can
-    # take a couple of hours. Cached runs finish far quicker.
-    timeout-minutes: 350
+    # A cold MPVKit build takes ~10 minutes (most dependencies are downloaded
+    # prebuilt; only FFmpeg and mpv compile from source). The bulk of the job
+    # is the Kotlin/Native + Xcode build.
+    timeout-minutes: 180
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.check.outputs.tag }}
@@ -149,6 +153,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "MPVKit submodule pinned at $sha"
 
+          hit=false
           if gh release download "mpvkit-$sha" \
               --repo "$GITHUB_REPOSITORY" \
               --pattern mpvkit-xcframeworks-ios.tar.gz \
@@ -156,11 +161,24 @@ jobs:
             mkdir -p source/MPVKit/dist/release
             tar -xzf mpvkit-xcframeworks-ios.tar.gz -C source/MPVKit/dist/release
             rm mpvkit-xcframeworks-ios.tar.gz
-            echo "hit=true" >> "$GITHUB_OUTPUT"
+
+            # Only count it as a hit if every local binary target of the
+            # MPVKit package is present; an incomplete cache (e.g. from a
+            # failed earlier run) is rebuilt and re-uploaded with --clobber.
+            hit=true
+            for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' source/MPVKit/Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
+              if [ ! -d "source/MPVKit/dist/release/xcframework/$name.xcframework" ]; then
+                echo "Cached MPVKit prebuilt is missing $name.xcframework; rebuilding."
+                hit=false
+              fi
+            done
+          fi
+
+          echo "hit=$hit" >> "$GITHUB_OUTPUT"
+          if [ "$hit" = "true" ]; then
             echo "Restored prebuilt xcframeworks for MPVKit@$sha"
           else
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "No prebuilt xcframeworks for MPVKit@$sha; will build from source."
+            echo "No usable prebuilt xcframeworks for MPVKit@$sha; will build from source."
           fi
 
       - name: Build MPVKit xcframeworks from source
@@ -171,6 +189,36 @@ jobs:
           # Same toolchain the upstream MPVKit build workflow installs.
           brew install autoconf automake libtool ninja meson
           make build platform=ios
+
+          # The build scripts wipe dist/release/xcframework at the start of
+          # every library's createXCFramework(), so after a full build only
+          # the last-built library (mpv) is left there. Each library's
+          # packageRelease() zip in dist/release/ survives, so reassemble the
+          # directory from those.
+          cd dist/release
+          mkdir -p xcframework
+          for z in *.xcframework.zip; do
+            unzip -oq "$z" -d xcframework
+          done
+
+          # Libplacebo is consumed as a prebuilt download during the build
+          # and never gets a local xcframework; fetch the prebuilt matching
+          # the version pinned in the build scripts.
+          if [ ! -d xcframework/Libplacebo.xcframework ]; then
+            version="$(awk '/case \.libplacebo:/ { getline; if (match($0, /"[0-9.]+"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit } }' ../../Sources/BuildScripts/XCFrameworkBuild/main.swift)"
+            test -n "$version" || { echo "::error::Could not determine libplacebo version from the MPVKit build scripts"; exit 1; }
+            curl -fL -o Libplacebo.xcframework.zip "https://github.com/mpvkit/libplacebo-build/releases/download/$version/Libplacebo.xcframework.zip"
+            unzip -oq Libplacebo.xcframework.zip -d xcframework
+          fi
+
+          # Fail here, before the result gets cached, if anything the MPVKit
+          # package needs is still missing.
+          for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' ../../Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
+            test -d "xcframework/$name.xcframework" || {
+              echo "::error::MPVKit build did not produce $name.xcframework"
+              exit 1
+            }
+          done
 
       - name: Publish MPVKit prebuilt cache release
         # Stored as a prerelease so it never shows up as this repo's "latest"
@@ -195,11 +243,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fail fast with a clear message if the MPVKit binaries are missing.
-          test -d source/MPVKit/dist/release/xcframework/Libmpv.xcframework || {
-            echo "::error::MPVKit dist/release/xcframework is missing Libmpv.xcframework"
-            exit 1
-          }
+          # Fail fast with a clear message if any MPVKit binary is missing.
+          for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' source/MPVKit/Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
+            test -d "source/MPVKit/dist/release/xcframework/$name.xcframework" || {
+              echo "::error::MPVKit dist/release/xcframework is missing $name.xcframework"
+              exit 1
+            }
+          done
 
           # NUVIO_IOS_DISTRIBUTION (job env) reaches the Gradle invocation via
           # the Xcode "Compile Kotlin Framework" script phase, matching
