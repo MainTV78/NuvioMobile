@@ -250,6 +250,18 @@ jobs:
           # is located via ANDROID_HOME.
           touch source/local.properties
 
+          # gradle.properties is tuned for developer machines
+          # (kotlin.native.jvmArgs=-Xmx12288M, org.gradle.jvmargs=-Xmx8192M),
+          # but standard macos-latest runners have only 7 GB of RAM total, so
+          # the Kotlin/Native linker OOMs during the release framework's
+          # LTO/devirtualization pass. Cap heap sizes to fit the runner; this
+          # only touches the ephemeral checkout, not the upstream source.
+          sed -i '' \
+            -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx4096M/' \
+            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx1536M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
+            source/gradle.properties
+
           # Fail fast with a clear message if any MPVKit binary is missing.
           for name in $(grep -o 'dist/release/xcframework/[A-Za-z0-9_+-]*\.xcframework' source/MPVKit/Package.swift | sed 's|.*/||; s|\.xcframework$||' | sort -u); do
             test -d "source/MPVKit/dist/release/xcframework/$name.xcframework" || {
