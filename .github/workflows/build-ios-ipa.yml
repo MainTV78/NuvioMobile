@@ -262,8 +262,8 @@ jobs:
           # checkout, not upstream source.
           sed -i '' \
             -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx8192M/' \
-            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx2048M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx12288M/' \
+            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx1024M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
             source/gradle.properties
 
           # Kotlin 2.3's release-mode whole-program LTO (DFG build +
