@@ -100,17 +100,18 @@ jobs:
     needs: check
     if: needs.check.outputs.should_build == 'true'
     # Intel standard runner (4 vCPU / 14 GB RAM), not macos-latest: the arm64
-    # standard runner has only 7 GB of RAM and the Kotlin/Native release link
-    # (LTO/devirtualization) needs ~8-12 GB of JVM heap for this codebase —
-    # upstream sizes kotlin.native.jvmArgs at 12 GB for developer machines.
-    # Intel standard runners are still free/unlimited on public repositories
-    # (only -large/-xlarge runners are paid), and Kotlin/Native cross-compiles
-    # the iOS arm64 framework from an x64 host.
+    # standard runner has only 7 GB of RAM, and the Kotlin/Native release
+    # link needs more than that for this codebase. Intel standard runners are
+    # still free/unlimited on public repositories (only -large/-xlarge are
+    # paid), and Kotlin/Native cross-compiles the iOS arm64 framework from an
+    # x64 host. This is the same runner the known-good reference build uses.
     runs-on: macos-15-intel
-    # A cold MPVKit build takes ~10 minutes (most dependencies are downloaded
-    # prebuilt; only FFmpeg and mpv compile from source). The bulk of the job
-    # is the Kotlin/Native + Xcode build.
-    timeout-minutes: 180
+    # The Kotlin/Native + Xcode release build genuinely takes hours on a
+    # standard runner: the reference build on this runner ranges from ~1h30m
+    # to ~3h45m. Allow for that plus a cold MPVKit build (~10 min), staying
+    # under GitHub's 360-minute per-job ceiling. An earlier 180-minute cap
+    # would have killed a healthy build partway through the link.
+    timeout-minutes: 330
     env:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ needs.check.outputs.tag }}
@@ -257,57 +258,18 @@ jobs:
           # is located via ANDROID_HOME.
           touch source/local.properties
 
-          # gradle.properties is tuned for developer machines; size the JVMs
-          # for the runner's 14 GB instead. This only touches the ephemeral
-          # checkout, not upstream source.
+          # Deliberately no gradle.properties rewriting and no pre-link step.
+          # Upstream's stock values (org.gradle.jvmargs 8 GB, kotlin.daemon
+          # 6 GB, kotlin.native 12 GB) are known to build this app on this
+          # exact runner: luqmanfadlli/NuvioMobile-iOS builds it green on
+          # macos-15-intel with no memory tuning whatsoever, letting
+          # xcodebuild drive Gradle through the Xcode script phase.
           #
-          # The Kotlin/Native compiler runs *inside the Gradle daemon* here,
-          # so org.gradle.jvmargs is the heap that actually governs both
-          # :compileKotlinIosArm64 and :linkReleaseFrameworkIosArm64 --
-          # kotlin.native.jvmArgs only applies when the compiler is spawned
-          # out-of-process, which it isn't. Earlier runs proved it: raising
-          # kotlin.native.jvmArgs from 8 GB to 12 GB while dropping
-          # org.gradle.jvmargs from 2 GB to 1 GB made the build fail sooner,
-          # and Gradle logged "running out of JVM heap space ... max heap
-          # space is '1 GiB'". Give the daemon the runner's memory and keep
-          # the other two JVMs small so they cannot compete for it.
-          sed -i '' \
-            -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx2048M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx11264M/' \
-            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx11264M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=1536m/' \
-            source/gradle.properties
-
-          # Kotlin 2.3's release-mode whole-program LTO (DFG build +
-          # devirtualization, KT-78518/KT-80367) is memory-hungry, and every
-          # run that OOM'd in it did so while the Gradle daemon was capped at
-          # 1-2 GB (see above) -- the "16 GB heap" those runs supposedly had
-          # was kotlin.native.jvmArgs, which never took effect. So LTO may
-          # well fit now that the daemon actually gets 11 GB. Keep it skipped
-          # for this run to change one variable at a time; once the pipeline
-          # is green, drop this patch and confirm whether LTO fits. It is
-          # worth removing -- optimized=false costs real runtime performance
-          # in the shipped framework.
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("source/composeApp/build.gradle.kts")
-          text = path.read_text()
-          needle = 'baseName = "ComposeApp"'
-          assert needle in text, "iOS framework block changed upstream; revisit this patch"
-          path.write_text(text.replace(needle, needle + "\n            optimized = false", 1))
-          PY
-
-      - name: Pre-link Kotlin framework
-        # Run the memory-hungry Kotlin/Native release link as its own step,
-        # before xcodebuild, so its heap peak doesn't compete with Xcode and
-        # clang for the runner's 14 GB. The Xcode "Compile Kotlin Framework"
-        # script phase re-runs Gradle afterwards and finds the link task
-        # up-to-date. The timeout is a fuse: if the over-provisioned heap
-        # degrades into swap-thrashing instead of finishing, fail fast
-        # rather than hanging for the job's full 3 hours.
-        timeout-minutes: 75
-        working-directory: source
-        run: ./gradlew :composeApp:linkReleaseFrameworkIosArm64
+          # Every OOM this workflow hit came from *our* retuning, not from
+          # upstream's defaults -- the failures tracked org.gradle.jvmargs
+          # (which we kept shrinking) while we raised kotlin.native.jvmArgs,
+          # a setting that never applied because the Kotlin/Native compiler
+          # runs inside the Gradle daemon here. Leave the defaults alone.
 
       - name: Archive app (unsigned)
         run: |
