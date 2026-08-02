@@ -260,20 +260,33 @@ jobs:
           # gradle.properties is tuned for developer machines; size the JVMs
           # for the runner's 14 GB instead. This only touches the ephemeral
           # checkout, not upstream source.
+          #
+          # The Kotlin/Native compiler runs *inside the Gradle daemon* here,
+          # so org.gradle.jvmargs is the heap that actually governs both
+          # :compileKotlinIosArm64 and :linkReleaseFrameworkIosArm64 --
+          # kotlin.native.jvmArgs only applies when the compiler is spawned
+          # out-of-process, which it isn't. Earlier runs proved it: raising
+          # kotlin.native.jvmArgs from 8 GB to 12 GB while dropping
+          # org.gradle.jvmargs from 2 GB to 1 GB made the build fail sooner,
+          # and Gradle logged "running out of JVM heap space ... max heap
+          # space is '1 GiB'". Give the daemon the runner's memory and keep
+          # the other two JVMs small so they cannot compete for it.
           sed -i '' \
-            -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx1024M/' \
-            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx12288M/' \
-            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx1024M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=512m/' \
+            -e 's/^kotlin\.daemon\.jvmargs=.*/kotlin.daemon.jvmargs=-Xmx2048M/' \
+            -e 's/^kotlin\.native\.jvmArgs=.*/kotlin.native.jvmArgs=-Xmx11264M/' \
+            -e 's/^org\.gradle\.jvmargs=.*/org.gradle.jvmargs=-Xmx11264M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=1536m/' \
             source/gradle.properties
 
           # Kotlin 2.3's release-mode whole-program LTO (DFG build +
-          # devirtualization, KT-78518/KT-80367) runs out of memory for this
-          # codebase even with a 16 GB heap — more than any free GitHub
-          # runner has. Kotlin 2.4 fixes the blow-up, but force-bumping
-          # upstream's toolchain from CI is riskier than skipping the
-          # optimization pass: optimized=false drops -opt from the framework
-          # link, which skips LTO and links comfortably in memory. Remove
-          # this once upstream is on Kotlin 2.4+.
+          # devirtualization, KT-78518/KT-80367) is memory-hungry, and every
+          # run that OOM'd in it did so while the Gradle daemon was capped at
+          # 1-2 GB (see above) -- the "16 GB heap" those runs supposedly had
+          # was kotlin.native.jvmArgs, which never took effect. So LTO may
+          # well fit now that the daemon actually gets 11 GB. Keep it skipped
+          # for this run to change one variable at a time; once the pipeline
+          # is green, drop this patch and confirm whether LTO fits. It is
+          # worth removing -- optimized=false costs real runtime performance
+          # in the shipped framework.
           python3 - <<'PY'
           from pathlib import Path
 
